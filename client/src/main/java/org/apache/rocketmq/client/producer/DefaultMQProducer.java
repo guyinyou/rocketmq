@@ -39,7 +39,9 @@ import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.message.MessageBatch;
 import org.apache.rocketmq.common.message.MessageClientIDSetter;
+import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.rocketmq.common.message.MessageId;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.topic.TopicValidator;
@@ -53,7 +55,7 @@ import org.apache.rocketmq.remoting.exception.RemotingException;
  * It's fine to tune fields which exposes getter/setter methods, but keep in mind, all of them should work well out of
  * box for most scenarios. </p>
  *
- * This class aggregates various <code>send</code> methods to deliver messages to broker(s). Each of them has pros and
+ * This class aggregates various <code>send</code> methods to deliver messages to brokers. Each of them has pros and
  * cons; you'd better understand strengths and weakness of them before actually coding. </p>
  *
  * <p> <strong>Thread Safety:</strong> After configuring and starting process, this class can be regarded as thread-safe
@@ -81,7 +83,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      *
      * For non-transactional messages, it does not matter as long as it's unique per process. </p>
      *
-     * See <a href="http://rocketmq.apache.org/docs/core-concept/">core concepts</a> for more discussion.
+     * See {@linktourl http://rocketmq.apache.org/docs/core-concept/} for more discussion.
      */
     private String producerGroup;
 
@@ -125,7 +127,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     private boolean retryAnotherBrokerWhenNotStoreOK = false;
 
     /**
-     * Maximum allowed message body size in bytes.
+     * Maximum allowed message size in bytes.
      */
     private int maxMessageSize = 1024 * 1024 * 4; // 4M
 
@@ -133,6 +135,15 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * Interface of asynchronous transfer data
      */
     private TraceDispatcher traceDispatcher = null;
+
+    /**
+     * Switch flag instance for automatic batch message
+     */
+    private boolean autoBatch = false;
+    /**
+     * Instance for batching message automatically
+     */
+    private ProduceAccumulator produceAccumulator = null;
 
     /**
      * Default constructor.
@@ -204,6 +215,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
         this.namespace = namespace;
         this.producerGroup = producerGroup;
         defaultMQProducerImpl = new DefaultMQProducerImpl(this, rpcHook);
+        produceAccumulator = MQClientManager.getInstance().getOrCreateProduceAccumulator(this);
     }
 
     /**
@@ -244,6 +256,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
         this.namespace = namespace;
         this.producerGroup = producerGroup;
         defaultMQProducerImpl = new DefaultMQProducerImpl(this, rpcHook);
+        produceAccumulator = MQClientManager.getInstance().getOrCreateProduceAccumulator(this);
         //if client open the message trace feature
         if (enableMsgTrace) {
             try {
@@ -263,7 +276,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     @Override
     public void setUseTLS(boolean useTLS) {
         super.setUseTLS(useTLS);
-        if (traceDispatcher instanceof AsyncTraceDispatcher) {
+        if (traceDispatcher != null && traceDispatcher instanceof AsyncTraceDispatcher) {
             ((AsyncTraceDispatcher) traceDispatcher).getTraceProducer().setUseTLS(useTLS);
         }
     }
@@ -280,6 +293,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public void start() throws MQClientException {
         this.setProducerGroup(withNamespace(this.producerGroup));
         this.defaultMQProducerImpl.start();
+        if (this.produceAccumulator != null) {
+            this.produceAccumulator.start();
+        }
         if (null != traceDispatcher) {
             try {
                 traceDispatcher.start(this.getNamesrvAddr(), this.getAccessChannel());
@@ -295,6 +311,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     @Override
     public void shutdown() {
         this.defaultMQProducerImpl.shutdown();
+        this.produceAccumulator.shutdown();
         if (null != traceDispatcher) {
             traceDispatcher.shutdown();
         }
@@ -316,7 +333,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * Send message in synchronous mode. This method returns only when the sending procedure totally completes. </p>
      *
      * <strong>Warn:</strong> this method has internal retry-mechanism, that is, internal implementation will retry
-     * {@link #retryTimesWhenSendFailed} times before claiming failure. As a result, multiple messages may be potentially
+     * {@link #retryTimesWhenSendFailed} times before claiming failure. As a result, multiple messages may potentially
      * delivered to broker(s). It's up to the application developers to resolve potential duplication issue.
      *
      * @param msg Message to send.
@@ -327,11 +344,37 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * @throws MQBrokerException if there is any error with broker.
      * @throws InterruptedException if the sending thread is interrupted.
      */
+
+    private boolean canBatch(Message msg) {
+        // produceAccumulator is full
+        if (!produceAccumulator.tryAddMessage(msg)) {
+            return false;
+        }
+        // delay message do not support batch processing
+        if (msg.getDelayTimeLevel() > 0) {
+            return false;
+        }
+        // retry message do not support batch processing
+        if (msg.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
+            return false;
+        }
+        // message which have been assigned to producer group do not support batch processing
+        if (msg.getProperties().containsKey(MessageConst.PROPERTY_PRODUCER_GROUP)) {
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public SendResult send(
         Message msg) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        return this.defaultMQProducerImpl.send(msg);
+
+        if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+            return sendByAccumulator(msg, null, null);
+        } else {
+            return sendDirect(msg, null, null);
+        }
     }
 
     /**
@@ -372,7 +415,15 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public void send(Message msg,
         SendCallback sendCallback) throws MQClientException, RemotingException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        this.defaultMQProducerImpl.send(msg, sendCallback);
+        try {
+            if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+                sendByAccumulator(msg, null, sendCallback);
+            } else {
+                sendDirect(msg, null, sendCallback);
+            }
+        } catch (Throwable e) {
+            sendCallback.onException(e);
+        }
     }
 
     /**
@@ -423,7 +474,12 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public SendResult send(Message msg, MessageQueue mq)
         throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        return this.defaultMQProducerImpl.send(msg, queueWithNamespace(mq));
+        mq = queueWithNamespace(mq);
+        if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+            return sendByAccumulator(msg, mq, null);
+        } else {
+            return sendDirect(msg, mq, null);
+        }
     }
 
     /**
@@ -456,11 +512,57 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * @throws RemotingException if there is any network-tier error.
      * @throws InterruptedException if the sending thread is interrupted.
      */
+
+    public SendResult sendDirect(Message msg, MessageQueue mq,
+        SendCallback sendCallback) throws MQClientException, RemotingException, InterruptedException, MQBrokerException {
+        // send in sync mode
+        if (sendCallback == null) {
+            if (mq == null) {
+                return this.defaultMQProducerImpl.send(msg);
+            } else {
+                return this.defaultMQProducerImpl.send(msg, mq);
+            }
+        } else {
+            if (mq == null) {
+                this.defaultMQProducerImpl.send(msg, sendCallback);
+            } else {
+                this.defaultMQProducerImpl.send(msg, mq, sendCallback);
+            }
+            return null;
+        }
+    }
+
+    public SendResult sendByAccumulator(Message msg, MessageQueue mq,
+        SendCallback sendCallback) throws MQClientException, RemotingException, InterruptedException, MQBrokerException {
+        // check whether it can batch
+        if (!canBatch(msg)) {
+            return sendDirect(msg, mq, sendCallback);
+        } else {
+            Validators.checkMessage(msg, this);
+            MessageClientIDSetter.setUniqID(msg);
+            if (sendCallback == null) {
+                return this.produceAccumulator.send(msg, mq, this);
+            } else {
+                this.produceAccumulator.send(msg, mq, sendCallback, this);
+                return null;
+            }
+        }
+    }
+
     @Override
     public void send(Message msg, MessageQueue mq, SendCallback sendCallback)
         throws MQClientException, RemotingException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        this.defaultMQProducerImpl.send(msg, queueWithNamespace(mq), sendCallback);
+        mq = queueWithNamespace(mq);
+        try {
+            if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+                sendByAccumulator(msg, mq, sendCallback);
+            } else {
+                sendDirect(msg, mq, sendCallback);
+            }
+        } catch (MQBrokerException e) {
+            // ignore
+        }
     }
 
     /**
@@ -514,7 +616,13 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public SendResult send(Message msg, MessageQueueSelector selector, Object arg)
         throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        return this.defaultMQProducerImpl.send(msg, selector, arg);
+        MessageQueue mq = this.defaultMQProducerImpl.invokeMessageQueueSelector(msg, selector, arg, this.getSendMsgTimeout());
+        mq = queueWithNamespace(mq);
+        if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+            return sendByAccumulator(msg, mq, null);
+        } else {
+            return sendDirect(msg, mq, null);
+        }
     }
 
     /**
@@ -553,7 +661,17 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public void send(Message msg, MessageQueueSelector selector, Object arg, SendCallback sendCallback)
         throws MQClientException, RemotingException, InterruptedException {
         msg.setTopic(withNamespace(msg.getTopic()));
-        this.defaultMQProducerImpl.send(msg, selector, arg, sendCallback);
+        try {
+            MessageQueue mq = this.defaultMQProducerImpl.invokeMessageQueueSelector(msg, selector, arg, this.getSendMsgTimeout());
+            mq = queueWithNamespace(mq);
+            if (this.getAutoBatch() && !(msg instanceof MessageBatch)) {
+                sendByAccumulator(msg, mq, sendCallback);
+            } else {
+                sendDirect(msg, mq, sendCallback);
+            }
+        } catch (Throwable e) {
+            sendCallback.onException(e);
+        }
     }
 
     /**
@@ -579,7 +697,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * Send request message in synchronous mode. This method returns only when the consumer consume the request message and reply a message. </p>
      *
      * <strong>Warn:</strong> this method has internal retry-mechanism, that is, internal implementation will retry
-     * {@link #retryTimesWhenSendFailed} times before claiming failure. As a result, multiple messages may be potentially
+     * {@link #retryTimesWhenSendFailed} times before claiming failure. As a result, multiple messages may potentially
      * delivered to broker(s). It's up to the application developers to resolve potential duplication issue.
      *
      * @param msg request message to send
@@ -825,7 +943,7 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     }
 
     /**
-     * Query the earliest message store time.
+     * Query earliest message store time.
      *
      * This method will be removed in a certain version after April 5, 2020, so please do not use this method.
      *
@@ -897,8 +1015,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     public MessageExt viewMessage(String topic,
         String msgId) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
         try {
+            MessageId oldMsgId = MessageDecoder.decodeMessageId(msgId);
             return this.viewMessage(msgId);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
         }
         return this.defaultMQProducerImpl.queryMessageByUniqKey(withNamespace(topic), msgId);
     }
@@ -928,7 +1047,8 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
     }
 
     @Override
-    public void send(Collection<Message> msgs, SendCallback sendCallback) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+    public void send(Collection<Message> msgs,
+        SendCallback sendCallback) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         this.defaultMQProducerImpl.send(batch(msgs), sendCallback);
     }
 
@@ -946,7 +1066,8 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
 
     @Override
     public void send(Collection<Message> msgs, MessageQueue mq,
-        SendCallback sendCallback, long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        SendCallback sendCallback,
+        long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         this.defaultMQProducerImpl.send(batch(msgs), queueWithNamespace(mq), sendCallback, timeout);
     }
 
@@ -993,6 +1114,62 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
         }
         msgBatch.setTopic(withNamespace(msgBatch.getTopic()));
         return msgBatch;
+    }
+
+    public int getBatchMaxDelayMs() {
+        if (this.produceAccumulator == null) {
+            return 0;
+        }
+        return produceAccumulator.getBatchMaxDelayMs();
+    }
+
+    public void batchMaxDelayMs(int holdMs) {
+        if (this.produceAccumulator == null) {
+            throw new UnsupportedOperationException("The currently constructed producer does not support autoBatch");
+        }
+        this.produceAccumulator.batchMaxDelayMs(holdMs);
+    }
+
+    public long getBatchMaxBytes() {
+        if (this.produceAccumulator == null) {
+            return 0;
+        }
+        return produceAccumulator.getBatchMaxBytes();
+    }
+
+    public void batchMaxBytes(long holdSize) {
+        if (this.produceAccumulator == null) {
+            throw new UnsupportedOperationException("The currently constructed producer does not support autoBatch");
+        }
+        this.produceAccumulator.batchMaxBytes(holdSize);
+    }
+
+    public long getTotalBatchMaxBytes() {
+        if (this.produceAccumulator == null) {
+            return 0;
+        }
+        return produceAccumulator.getTotalBatchMaxBytes();
+    }
+
+    public void totalBatchMaxBytes(long totalHoldSize) {
+        if (this.produceAccumulator == null) {
+            throw new UnsupportedOperationException("The currently constructed producer does not support autoBatch");
+        }
+        this.produceAccumulator.totalBatchMaxBytes(totalHoldSize);
+    }
+
+    public boolean getAutoBatch() {
+        if (this.produceAccumulator == null) {
+            return false;
+        }
+        return this.autoBatch;
+    }
+
+    public void setAutoBatch(boolean autoBatch) {
+        if (this.produceAccumulator == null) {
+            throw new UnsupportedOperationException("The currently constructed producer does not support autoBatch");
+        }
+        this.autoBatch = autoBatch;
     }
 
     public String getProducerGroup() {

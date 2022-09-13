@@ -29,6 +29,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.compression.Compressor;
 import org.apache.rocketmq.common.compression.CompressorFactory;
@@ -723,8 +725,17 @@ public class MessageDecoder {
         return msgs;
     }
 
+    static AtomicLong prevTime = new AtomicLong(0);
+    public static AtomicLong consumerBatchSize = new AtomicLong(0);
     public static void decodeMessage(MessageExt messageExt, List<MessageExt> list) throws Exception {
         List<Message> messages = MessageDecoder.decodeMessages(ByteBuffer.wrap(messageExt.getBody()));
+        synchronized (prevTime){
+            long nowTime = System.currentTimeMillis();
+            if(nowTime - prevTime.get() > 1000){
+                prevTime.set(nowTime);
+                consumerBatchSize.set(messages.size());
+            }
+        }
         for (int i = 0; i < messages.size(); i++) {
             Message message = messages.get(i);
             MessageClientExt messageClientExt = new MessageClientExt();

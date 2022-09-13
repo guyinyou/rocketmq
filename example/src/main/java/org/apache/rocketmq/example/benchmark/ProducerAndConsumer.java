@@ -36,6 +36,7 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.producer.DefaultMQProducer;
 import org.apache.rocketmq.client.producer.SendCallback;
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.TopicAttributes;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
@@ -58,7 +59,7 @@ public class ProducerAndConsumer {
     private static volatile AtomicInteger windowsSize = new AtomicInteger(512);
     private static volatile AtomicLong produceCnt = new AtomicLong(0);
 
-    public static void createTopic(final String topic, final int partitions) {
+    public static void createTopic(final String topic, final int partitions, boolean bcq) {
         TopicConfig topicConfig = new TopicConfig();
         topicConfig.setOrder(false);
         topicConfig.setPerm(6);
@@ -66,7 +67,9 @@ public class ProducerAndConsumer {
         topicConfig.setWriteQueueNums(partitions);
         topicConfig.setTopicName(topic);
 
-        topicConfig.getAttributes().put("+" + TopicAttributes.QUEUE_TYPE_ATTRIBUTE.getName(), "BatchCQ");
+        if(bcq) {
+            topicConfig.getAttributes().put("+" + TopicAttributes.QUEUE_TYPE_ATTRIBUTE.getName(), "BatchCQ");
+        }
         System.out.println(String.format("Create topic [%s]", topic));
         try {
             Set<String> brokerList = CommandUtil.fetchMasterAddrByClusterName(rmqAdmin, "DefaultCluster");
@@ -83,28 +86,52 @@ public class ProducerAndConsumer {
     }
 
     public static void main(String[] args) throws MQClientException, InterruptedException, MQBrokerException, RemotingException {
-        String namesrvAddr = "116.62.189.249:9876";
+        String namesrvAddr = System.getProperty(MixAll.NAMESRV_ADDR_PROPERTY, System.getenv(MixAll.NAMESRV_ADDR_ENV));
+        if(namesrvAddr == null){
+            System.out.println("namesrv is null");
+            System.exit(0);
+        }
 //        String namesrvAddr = "54.169.148.224:9876";
         String topicName = "Topic-UUID";
+        String groupName = "Group-UUID";
         int publishRate = 1000;
+        boolean bcq = false;
         boolean autoBatch = false;
         boolean isConsume = true;
         int partition = 1;
-        if (args.length > 0) {
-            publishRate = Integer.valueOf(args[0]);
-            if (args.length > 1) {
-                autoBatch = Boolean.valueOf(args[1]);
+        int i = 0;
+        if (args.length > i) {
+            publishRate = Integer.valueOf(args[i++]);
+            if (args.length > i) {
+                bcq = Boolean.valueOf(args[i++]);
             }
-            if (args.length > 2) {
-                partition = Integer.valueOf(args[2]);
+            if (args.length > i) {
+                autoBatch = Boolean.valueOf(args[i++]);
             }
-            if (args.length > 3) {
-                isConsume = Boolean.valueOf(args[3]);
+            if (args.length > i) {
+                isConsume = Boolean.valueOf(args[i++]);
             }
-            if (args.length > 4) {
-                topicName = args[3];
+            if (args.length > i) {
+                partition = Integer.valueOf(args[i++]);
+            }
+            if (args.length > i) {
+                topicName = args[i++];
+            }
+            if (args.length > i) {
+                groupName = args[i++];
             }
         }
+        if(groupName.equals("Group-UUID")) {
+            groupName = "Group-" + UUID.randomUUID();
+        }
+        System.out.println("publishRate: " + publishRate);
+        System.out.println("bcq: " + bcq);
+        System.out.println("autoBatch: " + autoBatch);
+        System.out.println("isConsume: " + isConsume);
+        System.out.println("partition: " + partition);
+        System.out.println("topicName: " + topicName);
+        System.out.println("groupName: " + groupName);
+        System.out.println("namesrvAddr: " + namesrvAddr);
 
         if(topicName.equals("Topic-UUID")) {
             topicName = "Topic-" + UUID.randomUUID();
@@ -119,7 +146,7 @@ public class ProducerAndConsumer {
 
             while (true) {
                 try {
-                    createTopic(topicName, partition);
+                    createTopic(topicName, partition, bcq);
                     break;
                 } catch (Exception e) {
                     e.printStackTrace();
@@ -127,7 +154,7 @@ public class ProducerAndConsumer {
             }
         }
         AtomicLong consumerCnt = new AtomicLong(0);
-        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("please_rename_unique_group_name_4");
+        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(groupName);
         consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_FIRST_OFFSET);
         consumer.subscribe(topicName, "*");
         consumer.setNamesrvAddr(namesrvAddr);
@@ -148,7 +175,7 @@ public class ProducerAndConsumer {
 
 
         if(publishRate > 0) {
-            DefaultMQProducer producer = new DefaultMQProducer("please_rename_unique_group_name");
+            DefaultMQProducer producer = new DefaultMQProducer(groupName);
             producer.setNamesrvAddr(namesrvAddr);
             producer.start();
 

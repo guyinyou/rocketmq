@@ -83,12 +83,6 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
 
                 this.brokerController.getBrokerStatsManager().incBrokerGetNums(getMessageResult.getMessageCount());
 
-                if (!channelIsWritable(channel, requestHeader)) {
-                    getMessageResult.release();
-                    //ignore pull request
-                    return null;
-                }
-
                 if (this.brokerController.getBrokerConfig().isTransferMsgByHeap()) {
 
                     final long beginTimeMills = this.brokerController.getMessageStore().now();

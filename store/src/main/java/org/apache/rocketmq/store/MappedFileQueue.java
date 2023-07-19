@@ -36,6 +36,7 @@ import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.store.logfile.DefaultMappedFile;
 import org.apache.rocketmq.store.logfile.MappedFile;
+import org.apache.rocketmq.store.util.UnsafeUtils;
 
 public class MappedFileQueue implements Swappable {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -233,7 +234,6 @@ public class MappedFileQueue implements Swappable {
         }
     }
 
-
     public boolean load() {
         File dir = new File(this.storePath);
         File[] ls = dir.listFiles();
@@ -261,7 +261,7 @@ public class MappedFileQueue implements Swappable {
 
             if (file.length() != this.mappedFileSize) {
                 log.warn(file + "\t" + file.length()
-                        + " length not matched message store config value, please check it manually");
+                    + " length not matched message store config value, please check it manually");
                 return false;
             }
 
@@ -344,7 +344,7 @@ public class MappedFileQueue implements Swappable {
     public MappedFile tryCreateMappedFile(long createOffset) {
         String nextFilePath = this.storePath + File.separator + UtilAll.offset2FileName(createOffset);
         String nextNextFilePath = this.storePath + File.separator + UtilAll.offset2FileName(createOffset
-                + this.mappedFileSize);
+            + this.mappedFileSize);
         return doCreateMappedFile(nextFilePath, nextNextFilePath);
     }
 
@@ -353,7 +353,7 @@ public class MappedFileQueue implements Swappable {
 
         if (this.allocateMappedFileService != null) {
             mappedFile = this.allocateMappedFileService.putRequestAndReturnMappedFile(nextFilePath,
-                    nextNextFilePath, this.mappedFileSize);
+                nextNextFilePath, this.mappedFileSize);
         } else {
             try {
                 mappedFile = new DefaultMappedFile(nextFilePath, this.mappedFileSize);
@@ -377,6 +377,9 @@ public class MappedFileQueue implements Swappable {
     }
 
     public MappedFile getLastMappedFile() {
+        if (UnsafeUtils.isEnableYitianOptimized() || UnsafeUtils.isEnableX86Optimized()) {
+            return (MappedFile) UnsafeUtils.unsafeGetLastElement(this.mappedFiles);
+        }
         MappedFile[] mappedFiles = this.mappedFiles.toArray(new MappedFile[0]);
         return mappedFiles.length == 0 ? null : mappedFiles[mappedFiles.length - 1];
     }
@@ -647,7 +650,7 @@ public class MappedFileQueue implements Swappable {
     /**
      * Finds a mapped file by offset.
      *
-     * @param offset Offset.
+     * @param offset                Offset.
      * @param returnFirstOnNotFound If the mapped file is not found, then return the first one.
      * @return Mapped file or null (when not found and returnFirstOnNotFound is <code>false</code>).
      */
@@ -795,7 +798,7 @@ public class MappedFileQueue implements Swappable {
                 continue;
             }
             if (System.currentTimeMillis() - mappedFile.getRecentSwapMapTime() > normalSwapIntervalMs
-                    && mappedFile.getMappedByteBufferAccessCountSinceLastSwap() > 0) {
+                && mappedFile.getMappedByteBufferAccessCountSinceLastSwap() > 0) {
                 mappedFile.swapMap();
                 continue;
             }

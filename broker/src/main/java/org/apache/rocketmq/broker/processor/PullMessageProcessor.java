@@ -42,6 +42,7 @@ import org.apache.rocketmq.common.help.FAQUrl;
 import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
+import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.netty.NettyRemotingAbstract;
@@ -298,12 +299,20 @@ public class PullMessageProcessor implements NettyRequestProcessor {
         return false;
     }
 
-    private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend, boolean brokerAllowFlowCtrSuspend)
+    public static PullMessageRequestHeader parseRequestHeader(RemotingCommand request) throws RemotingCommandException {
+        CommandCustomHeader headerInRequest = request.getCustomHeaderInRequest();
+        if (headerInRequest instanceof PullMessageRequestHeader) {
+            return (PullMessageRequestHeader) headerInRequest;
+        }
+        return (PullMessageRequestHeader) request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
+    }
+
+    private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend,
+        boolean brokerAllowFlowCtrSuspend)
         throws RemotingCommandException {
         RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
-        final PullMessageRequestHeader requestHeader =
-            (PullMessageRequestHeader) request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
+        final PullMessageRequestHeader requestHeader = parseRequestHeader(request);
 
         response.setOpaque(request.getOpaque());
 
@@ -488,7 +497,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
 
         final MessageStore messageStore = brokerController.getMessageStore();
         if (this.brokerController.getMessageStore() instanceof DefaultMessageStore) {
-            DefaultMessageStore defaultMessageStore = (DefaultMessageStore)this.brokerController.getMessageStore();
+            DefaultMessageStore defaultMessageStore = (DefaultMessageStore) this.brokerController.getMessageStore();
             boolean cgNeedColdDataFlowCtr = brokerController.getColdDataCgCtrService().isCgNeedColdDataFlowCtr(requestHeader.getConsumerGroup());
             if (cgNeedColdDataFlowCtr) {
                 boolean isMsgLogicCold = defaultMessageStore.getCommitLog()
@@ -586,12 +595,12 @@ public class PullMessageProcessor implements NettyRequestProcessor {
 
     /**
      * Composes the header of the response message to be sent back to the client
-     * @param requestHeader - the header of the request message
-     * @param getMessageResult - the result of the GetMessage request
-     * @param topicSysFlag - the system flag of the topic
+     * @param requestHeader           - the header of the request message
+     * @param getMessageResult        - the result of the GetMessage request
+     * @param topicSysFlag            - the system flag of the topic
      * @param subscriptionGroupConfig - configuration of the subscription group
-     * @param response - the response message to be sent back to the client
-     * @param clientAddress - the address of the client
+     * @param response                - the response message to be sent back to the client
+     * @param clientAddress           - the address of the client
      */
     protected void composeResponseHeader(PullMessageRequestHeader requestHeader, GetMessageResult getMessageResult,
         int topicSysFlag, SubscriptionGroupConfig subscriptionGroupConfig, RemotingCommand response,

@@ -59,7 +59,10 @@ import org.apache.rocketmq.store.config.FlushDiskType;
 import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.ha.autoswitch.AutoSwitchHAService;
 import org.apache.rocketmq.store.logfile.MappedFile;
+import org.apache.rocketmq.store.util.ARMUtils;
 import org.apache.rocketmq.store.util.LibC;
+import org.apache.rocketmq.store.util.MCSLock;
+import org.apache.rocketmq.store.util.UnsafeUtils;
 import sun.nio.ch.DirectBuffer;
 
 /**
@@ -118,12 +121,18 @@ public class CommitLog implements Swappable {
                 return new PutMessageThreadLocal(defaultMessageStore.getMessageStoreConfig().getMaxMessageSize());
             }
         };
-        this.putMessageLock = messageStore.getMessageStoreConfig().isUseReentrantLockWhenPutMessage() ? new PutMessageReentrantLock() : new PutMessageSpinLock();
-
         this.flushDiskWatcher = new FlushDiskWatcher();
-
-        this.topicQueueLock = new TopicQueueLock();
-
+        // 倚天适配时，写文件使用公平锁MCS，分区锁使用原子锁
+        if (ARMUtils.isEnableYitianOptimized()) {
+            this.putMessageLock = new MCSLock();
+            this.topicQueueLock = new TopicQueueLock(false);
+        } else if (ARMUtils.isEnableX86Optimized()) {
+            this.putMessageLock = new PutMessageReentrantLock();
+            this.topicQueueLock = new TopicQueueLock();
+        } else {
+            this.putMessageLock = messageStore.getMessageStoreConfig().isUseReentrantLockWhenPutMessage() ? new PutMessageReentrantLock() : new PutMessageSpinLock();
+            this.topicQueueLock = new TopicQueueLock();
+        }
         this.commitLogSize = messageStore.getMessageStoreConfig().getMappedFileSizeCommitLog();
     }
 
@@ -489,8 +498,12 @@ public class CommitLog implements Swappable {
             Map<String, String> propertiesMap = null;
             if (propertiesLength > 0) {
                 byteBuffer.get(bytesContent, 0, propertiesLength);
-                String properties = new String(bytesContent, 0, propertiesLength, MessageDecoder.CHARSET_UTF8);
-                propertiesMap = MessageDecoder.string2messageProperties(properties);
+                if (ARMUtils.isEnableYitianOptimized() || ARMUtils.isEnableX86Optimized()) {
+                    propertiesMap = UnsafeUtils.fastString2messageProperties(bytesContent, 0, propertiesLength);
+                } else {
+                    String properties = new String(bytesContent, 0, propertiesLength, MessageDecoder.CHARSET_UTF8);
+                    propertiesMap = MessageDecoder.string2messageProperties(properties);
+                }
 
                 keys = propertiesMap.get(MessageConst.PROPERTY_KEYS);
 
@@ -1067,7 +1080,11 @@ public class CommitLog implements Swappable {
         String topicQueueKey = generateKey(pmThreadLocal.getKeyBuilder(), messageExtBatch);
 
         PutMessageContext putMessageContext = new PutMessageContext(topicQueueKey);
-        messageExtBatch.setEncodedBuff(batchEncoder.encode(messageExtBatch, putMessageContext));
+        if (ARMUtils.isEnableYitianOptimized()) {
+            messageExtBatch.setEncodedBuff(batchEncoder.arm64FastEncode(messageExtBatch, putMessageContext));
+        } else {
+            messageExtBatch.setEncodedBuff(batchEncoder.encode(messageExtBatch, putMessageContext));
+        }
 
         topicQueueLock.lock(topicQueueKey);
         try {
@@ -1933,7 +1950,8 @@ public class CommitLog implements Swappable {
             this.commitRealTimeService = new CommitLog.CommitRealTimeService();
         }
 
-        @Override public void start() {
+        @Override
+        public void start() {
             this.flushCommitLogService.start();
 
             if (defaultMessageStore.isTransientStorePoolEnable()) {
@@ -2128,7 +2146,7 @@ public class CommitLog implements Swappable {
                 return true;
             }
 
-            int pos = (int)(offset % defaultMessageStore.getMessageStoreConfig().getMappedFileSizeCommitLog());
+            int pos = (int) (offset % defaultMessageStore.getMessageStoreConfig().getMappedFileSizeCommitLog());
             int realIndex = pos / pageSize / sampleSteps;
             return bytes.length - 1 >= realIndex && bytes[realIndex] != 0;
         }
@@ -2172,8 +2190,8 @@ public class CommitLog implements Swappable {
 
         private byte[] checkFileInPageCache(MappedFile mappedFile) {
             long fileSize = mappedFile.getFileSize();
-            final long address = ((DirectBuffer)mappedFile.getMappedByteBuffer()).address();
-            int pageNums = (int)(fileSize + this.pageSize - 1) / this.pageSize;
+            final long address = ((DirectBuffer) mappedFile.getMappedByteBuffer()).address();
+            int pageNums = (int) (fileSize + this.pageSize - 1) / this.pageSize;
             byte[] pageCacheRst = new byte[pageNums];
             int mincore = LibC.INSTANCE.mincore(new Pointer(address), new NativeLong(fileSize), pageCacheRst);
             if (mincore != 0) {
@@ -2211,7 +2229,7 @@ public class CommitLog implements Swappable {
                 return false;
             }
             try {
-                ConsumeQueue consumeQueue = (ConsumeQueue)defaultMessageStore.findConsumeQueue(topic, queueId);
+                ConsumeQueue consumeQueue = (ConsumeQueue) defaultMessageStore.findConsumeQueue(topic, queueId);
                 if (null == consumeQueue) {
                     return false;
                 }
@@ -2249,7 +2267,7 @@ public class CommitLog implements Swappable {
             log.error("setFileReadMode mappedFile is null");
             return -1;
         }
-        final long address = ((DirectBuffer)mappedFile.getMappedByteBuffer()).address();
+        final long address = ((DirectBuffer) mappedFile.getMappedByteBuffer()).address();
         int madvise = LibC.INSTANCE.madvise(new Pointer(address), new NativeLong(mappedFile.getFileSize()), mode);
         if (madvise != 0) {
             log.error("setFileReadMode error fileName: {}, madvise: {}, mode:{}", mappedFile.getFileName(), madvise, mode);

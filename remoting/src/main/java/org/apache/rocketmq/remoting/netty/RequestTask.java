@@ -85,4 +85,8 @@ public class RequestTask implements Runnable {
         response.setOpaque(request.getOpaque());
         this.channel.writeAndFlush(response);
     }
+
+    public RemotingCommand getRequest() {
+        return request;
+    }
 }

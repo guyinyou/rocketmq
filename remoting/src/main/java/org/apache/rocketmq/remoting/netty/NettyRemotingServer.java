@@ -558,13 +558,13 @@ public class NettyRemotingServer extends NettyRemotingAbstract implements Remoti
             if (channel.isWritable()) {
                 if (!channel.config().isAutoRead()) {
                     channel.config().setAutoRead(true);
-                    log.info("Channel[{}] turns writable, bytes to buffer before changing channel to un-writable: {}",
-                        RemotingHelper.parseChannelRemoteAddr(channel), channel.bytesBeforeUnwritable());
+//                    log.info("Channel[{}] turns writable, bytes to buffer before changing channel to un-writable: {}",
+//                        RemotingHelper.parseChannelRemoteAddr(channel), channel.bytesBeforeUnwritable());
                 }
             } else {
                 channel.config().setAutoRead(false);
-                log.warn("Channel[{}] auto-read is disabled, bytes to drain before it turns writable: {}",
-                    RemotingHelper.parseChannelRemoteAddr(channel), channel.bytesBeforeWritable());
+//                log.warn("Channel[{}] auto-read is disabled, bytes to drain before it turns writable: {}",
+//                    RemotingHelper.parseChannelRemoteAddr(channel), channel.bytesBeforeWritable());
             }
             super.channelWritabilityChanged(ctx);
         }

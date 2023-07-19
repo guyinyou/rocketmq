@@ -21,6 +21,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
+
+import io.netty.buffer.ByteBuf;
 import org.apache.rocketmq.common.TopicFilterType;
 import org.apache.rocketmq.common.sysflag.MessageSysFlag;
 
@@ -68,6 +70,18 @@ public class MessageExt extends Message {
         return TopicFilterType.SINGLE_TAG;
     }
 
+    public static boolean socketAddress2ByteBuf(final SocketAddress socketAddress, final ByteBuf byteBuf) {
+        InetSocketAddress inetSocketAddress = (InetSocketAddress) socketAddress;
+        InetAddress address = inetSocketAddress.getAddress();
+        if (address instanceof Inet4Address) {
+            byteBuf.writeBytes(inetSocketAddress.getAddress().getAddress(), 0, 4);
+        } else {
+            byteBuf.writeBytes(inetSocketAddress.getAddress().getAddress(), 0, 16);
+        }
+        byteBuf.writeInt(inetSocketAddress.getPort());
+        return true;
+    }
+
     public static ByteBuffer socketAddress2ByteBuffer(final SocketAddress socketAddress, final ByteBuffer byteBuffer) {
         InetSocketAddress inetSocketAddress = (InetSocketAddress) socketAddress;
         InetAddress address = inetSocketAddress.getAddress();
@@ -101,12 +115,20 @@ public class MessageExt extends Message {
         return socketAddress2ByteBuffer(this.bornHost, byteBuffer);
     }
 
+    public boolean getBornHostBytes(ByteBuf byteBuf) {
+        return socketAddress2ByteBuf(this.bornHost, byteBuf);
+    }
+
     public ByteBuffer getStoreHostBytes() {
         return socketAddress2ByteBuffer(this.storeHost);
     }
 
     public ByteBuffer getStoreHostBytes(ByteBuffer byteBuffer) {
         return socketAddress2ByteBuffer(this.storeHost, byteBuffer);
+    }
+
+    public boolean getStoreHostBytes(ByteBuf byteBuf) {
+        return socketAddress2ByteBuf(this.storeHost, byteBuf);
     }
 
     public String getBrokerName() {

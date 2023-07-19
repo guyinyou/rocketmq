@@ -21,6 +21,7 @@
 package org.apache.rocketmq.remoting.protocol.header;
 
 import com.google.common.base.MoreObjects;
+import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.annotation.CFNotNull;
 import org.apache.rocketmq.remoting.annotation.CFNullable;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
@@ -168,6 +169,10 @@ public class SendMessageRequestHeader extends TopicQueueRequestHeader {
     }
 
     public static SendMessageRequestHeader parseRequestHeader(RemotingCommand request) throws RemotingCommandException {
+        CommandCustomHeader headerInRequest = request.getCustomHeaderInRequest();
+        if (headerInRequest instanceof SendMessageRequestHeader) {
+            return (SendMessageRequestHeader) headerInRequest;
+        }
         SendMessageRequestHeaderV2 requestHeaderV2 = null;
         SendMessageRequestHeader requestHeader = null;
         switch (request.getCode()) {

@@ -19,6 +19,7 @@ package org.apache.rocketmq.store;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
+import org.apache.rocketmq.common.EncodeResult;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageDecoder;
@@ -30,6 +31,7 @@ import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import org.apache.rocketmq.store.util.ARMUtils;
 
 public class MessageExtEncoder {
     protected static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -38,6 +40,7 @@ public class MessageExtEncoder {
     private int maxMessageBodySize;
     // The maximum length of the full message.
     private int maxMessageSize;
+
     public MessageExtEncoder(final int maxMessageBodySize) {
         ByteBufAllocator alloc = UnpooledByteBufAllocator.DEFAULT;
         //Reserve 64kb for encoding buffer outside body
@@ -164,6 +167,31 @@ public class MessageExtEncoder {
             this.byteBuf.writeBytes(propertiesData);
 
         return null;
+    }
+
+    protected ByteBuffer arm64FastEncode(final MessageExtBatch messageExtBatch, PutMessageContext putMessageContext) {
+        this.byteBuf.clear();
+
+        int totalLength = messageExtBatch.getBody().length;
+        if (totalLength > this.maxMessageBodySize) {
+            CommitLog.log.warn("message body size exceeded, msg body size: " + totalLength + ", maxMessageSize: " + this.maxMessageBodySize);
+            throw new RuntimeException("message body size exceeded");
+        }
+
+        // properties from MessageExtBatch
+        String batchPropStr = MessageDecoder.messageProperties2String(messageExtBatch.getProperties());
+        final byte[] batchPropData = batchPropStr.getBytes(MessageDecoder.CHARSET_UTF8);
+        int batchPropDataLen = batchPropData.length;
+        if (batchPropDataLen > Short.MAX_VALUE) {
+            CommitLog.log.warn("Properties size of messageExtBatch exceeded, properties size: {}, maxSize: {}.", batchPropDataLen, Short.MAX_VALUE);
+            throw new RuntimeException("Properties size of messageExtBatch exceeded!");
+        }
+        EncodeResult encodeResult = ARMUtils.encode(messageExtBatch, batchPropData, byteBuf);
+        int batchSize = encodeResult.getBatchSize();
+        putMessageContext.setBatchSize(batchSize);
+        putMessageContext.setPhyPos(new long[batchSize]);
+
+        return encodeResult.getBuffer();
     }
 
     public ByteBuffer encode(final MessageExtBatch messageExtBatch, PutMessageContext putMessageContext) {
@@ -304,6 +332,7 @@ public class MessageExtEncoder {
     static class PutMessageThreadLocal {
         private final MessageExtEncoder encoder;
         private final StringBuilder keyBuilder;
+
         PutMessageThreadLocal(int size) {
             encoder = new MessageExtEncoder(size);
             keyBuilder = new StringBuilder();

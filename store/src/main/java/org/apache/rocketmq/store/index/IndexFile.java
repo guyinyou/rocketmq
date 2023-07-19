@@ -199,7 +199,7 @@ public class IndexFile {
     }
 
     public void selectPhyOffset(final List<Long> phyOffsets, final String key, final int maxNum,
-                                final long begin, final long end) {
+        final long begin, final long end) {
         if (this.mappedFile.hold()) {
             int keyHash = indexKeyHashMethod(key);
             int slotPos = keyHash % this.hashSlotNum;

@@ -26,6 +26,8 @@ import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.annotation.CFNotNull;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.FastCodesHeader;
+import org.apache.rocketmq.remoting.protocol.UnsafeString;
+import org.apache.rocketmq.remoting.protocol.UnsafeUtils;
 
 public class SendMessageResponseHeader implements CommandCustomHeader, FastCodesHeader {
     @CFNotNull
@@ -48,6 +50,24 @@ public class SendMessageResponseHeader implements CommandCustomHeader, FastCodes
         writeIfNotNull(out, "queueOffset", queueOffset);
         writeIfNotNull(out, "transactionId", transactionId);
         writeIfNotNull(out, "batchUniqId", batchUniqId);
+    }
+
+    public void encodeJson(ByteBuf out) {
+        out.writeBytes("\"msgId\":\"".getBytes());
+        out.writeBytes(UnsafeString.unsafeGetBytes(msgId));
+        out.writeBytes("\",\"queueId\":\"".getBytes());
+        UnsafeUtils.writeUnsignedInt(out, queueId);
+        out.writeBytes("\",\"queueOffset\":\"".getBytes());
+        UnsafeUtils.writeUnsignedLong(out, queueOffset);
+        if (transactionId != null) {
+            out.writeBytes("\",\"transactionId\":\"".getBytes());
+            out.writeBytes(UnsafeString.unsafeGetBytes(transactionId));
+        }
+        if (batchUniqId != null) {
+            out.writeBytes("\",\"batchUniqId\":\"".getBytes());
+            out.writeBytes(UnsafeString.unsafeGetBytes(batchUniqId));
+        }
+        out.writeBytes("\",".getBytes());
     }
 
     @Override

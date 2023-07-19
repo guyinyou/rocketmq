@@ -40,6 +40,7 @@ import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.annotation.CFNotNull;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
+import sun.nio.ch.DirectBuffer;
 
 public class RemotingCommand {
     public static final String SERIALIZE_TYPE_PROPERTY = "rocketmq.serialize.type";
@@ -68,7 +69,15 @@ public class RemotingCommand {
 
     private static SerializeType serializeTypeConfigInThisServer = SerializeType.JSON;
 
+    private static final ThreadLocal<DirectBuffer> bufThreadLocal;
+
     static {
+        bufThreadLocal = ThreadLocal.withInitial(() -> {
+            int cap = 64;
+            DirectBuffer buffer = (DirectBuffer) ByteBuffer.allocateDirect(cap);
+            ((ByteBuffer) buffer).limit(cap);
+            return buffer;
+        });
         final String protocol = System.getProperty(SERIALIZE_TYPE_PROPERTY, System.getenv(SERIALIZE_TYPE_ENV));
         if (!StringUtils.isBlank(protocol)) {
             try {
@@ -88,13 +97,14 @@ public class RemotingCommand {
     private HashMap<String, String> extFields;
     private transient CommandCustomHeader customHeader;
 
+    private transient CommandCustomHeader customHeaderInRequest;
     private SerializeType serializeTypeCurrentRPC = serializeTypeConfigInThisServer;
 
     private transient byte[] body;
     private boolean suspended;
     private Stopwatch processTimer;
 
-    protected RemotingCommand() {
+    public RemotingCommand() {
     }
 
     public static RemotingCommand createRequestCommand(int code, CommandCustomHeader customHeader) {
@@ -129,6 +139,14 @@ public class RemotingCommand {
 
     public static RemotingCommand createResponseCommand(Class<? extends CommandCustomHeader> classHeader) {
         return createResponseCommand(RemotingSysResponseCode.SYSTEM_ERROR, "not set any response code", classHeader);
+    }
+
+    public void setCustomHeaderInRequest(CommandCustomHeader header) {
+        this.customHeaderInRequest = header;
+    }
+
+    public CommandCustomHeader getCustomHeaderInRequest() {
+        return customHeaderInRequest;
     }
 
     public static RemotingCommand buildErrorResponse(int code, String remark,
@@ -211,9 +229,14 @@ public class RemotingCommand {
         SerializeType type) throws RemotingCommandException {
         switch (type) {
             case JSON:
-                byte[] headerData = new byte[len];
-                byteBuffer.readBytes(headerData);
-                RemotingCommand resultJson = RemotingSerializable.decode(headerData, RemotingCommand.class);
+                RemotingCommand resultJson;
+                if (RemotingCommandCodec.isEnableYitianOptimized()) {
+                    resultJson = RemotingCommandCodec.fastJsonDecode(byteBuffer, len, bufThreadLocal.get());
+                } else {
+                    byte[] headerData = new byte[len];
+                    byteBuffer.readBytes(headerData);
+                    resultJson = RemotingSerializable.decode(headerData, RemotingCommand.class);
+                }
                 resultJson.setSerializeTypeCurrentRPC(type);
                 return resultJson;
             case ROCKETMQ:
@@ -453,10 +476,15 @@ public class RemotingCommand {
             }
             headerSize = RocketMQSerializable.rocketMQProtocolEncode(this, out);
         } else {
-            this.makeCustomHeaderToNet();
-            byte[] header = RemotingSerializable.encode(this);
-            headerSize = header.length;
-            out.writeBytes(header);
+            if (RemotingCommandCodec.isEnableYitianOptimized()) {
+                RemotingCommandCodec.fastJsonEncode(out, this);
+                headerSize = out.writerIndex() - beginIndex - 8;
+            } else {
+                this.makeCustomHeaderToNet();
+                byte[] header = RemotingSerializable.encode(this);
+                headerSize = header.length;
+                out.writeBytes(header);
+            }
         }
         out.setInt(beginIndex, 4 + headerSize + bodySize);
         out.setInt(beginIndex + 4, markProtocolType(headerSize, serializeTypeCurrentRPC));

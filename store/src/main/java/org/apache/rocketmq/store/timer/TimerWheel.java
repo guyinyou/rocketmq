@@ -32,13 +32,14 @@ import java.nio.channels.FileChannel;
 public class TimerWheel {
 
     private static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
+    public static final String TIMER_WHEEL_FILE_NAME = "timerwheel";
     public static final int BLANK = -1, IGNORE = -2;
     public final int slotsTotal;
     public final int precisionMs;
     private String fileName;
     private final RandomAccessFile randomAccessFile;
-    private final FileChannel fileChannel;
-    private final MappedByteBuffer mappedByteBuffer;
+    //    private final FileChannel fileChannel;
+//    private final MappedByteBuffer mappedByteBuffer;
     private final ByteBuffer byteBuffer;
     private final ThreadLocal<ByteBuffer> localBuffer = new ThreadLocal<ByteBuffer>() {
         @Override
@@ -49,32 +50,41 @@ public class TimerWheel {
     private final int wheelLength;
 
     public TimerWheel(String fileName, int slotsTotal, int precisionMs) throws IOException {
+        this(fileName, -1, slotsTotal, precisionMs);
+    }
+
+    public TimerWheel(String fileName, long flag, int slotsTotal, int precisionMs) throws IOException {
+        this.fileName = fileName;
         this.slotsTotal = slotsTotal;
         this.precisionMs = precisionMs;
-        this.fileName = fileName;
         this.wheelLength = this.slotsTotal * 2 * Slot.SIZE;
 
-        File file = new File(fileName);
+        String currentFileName = selectSnapshotByFlag(flag);
+        File file = new File(currentFileName);
         UtilAll.ensureDirOK(file.getParent());
 
         try {
-            randomAccessFile = new RandomAccessFile(this.fileName, "rw");
+            randomAccessFile = new RandomAccessFile(currentFileName, "rw");
             if (file.exists() && randomAccessFile.length() != 0 &&
                 randomAccessFile.length() != wheelLength) {
                 throw new RuntimeException(String.format("Timer wheel length:%d != expected:%s",
                     randomAccessFile.length(), wheelLength));
             }
             randomAccessFile.setLength(wheelLength);
-            fileChannel = randomAccessFile.getChannel();
-            mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, wheelLength);
+            FileChannel fileChannel = randomAccessFile.getChannel();
+            MappedByteBuffer mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, wheelLength);
             assert wheelLength == mappedByteBuffer.remaining();
             this.byteBuffer = ByteBuffer.allocateDirect(wheelLength);
             this.byteBuffer.put(mappedByteBuffer);
+
+            // unmap mappedByteBuffer
+            UtilAll.cleanBuffer(mappedByteBuffer);
+            fileChannel.close();
         } catch (FileNotFoundException e) {
-            log.error("create file channel " + this.fileName + " Failed. ", e);
+            log.error("create file channel " + currentFileName + " Failed. ", e);
             throw e;
         } catch (IOException e) {
-            log.error("map file " + this.fileName + " Failed. ", e);
+            log.error("map file " + currentFileName + " Failed. ", e);
             throw e;
         }
     }
@@ -84,32 +94,34 @@ public class TimerWheel {
     }
 
     public void shutdown(boolean flush) {
-        if (flush)
-            this.flush();
-
-        // unmap mappedByteBuffer
-        UtilAll.cleanBuffer(this.mappedByteBuffer);
-        UtilAll.cleanBuffer(this.byteBuffer);
-
-        try {
-            this.fileChannel.close();
-        } catch (IOException e) {
-            log.error("Shutdown error in timer wheel", e);
+        if (flush) {
+            try {
+                this.flush();
+            } catch (IOException e) {
+                log.error("Shutdown error in timer wheel", e);
+            }
         }
+        // unmap mappedByteBuffer
+//        UtilAll.cleanBuffer(this.mappedByteBuffer);
+        UtilAll.cleanBuffer(this.byteBuffer);
     }
 
-    public void flush() {
+    public void flush() throws IOException {
+        this.flush(-1);
+    }
+
+    public void flush(long timeStamp) throws IOException {
         ByteBuffer bf = localBuffer.get();
         bf.position(0);
         bf.limit(wheelLength);
+
+        String fileName = selectSnapshotByFlag(timeStamp);
+        RandomAccessFile randomAccessFile = new RandomAccessFile(fileName, "rw");
+        FileChannel fileChannel = randomAccessFile.getChannel();
+        MappedByteBuffer mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, wheelLength);
         mappedByteBuffer.position(0);
-        mappedByteBuffer.limit(wheelLength);
-        for (int i = 0; i < wheelLength; i++) {
-            if (bf.get(i) != mappedByteBuffer.get(i)) {
-                mappedByteBuffer.put(i, bf.get(i));
-            }
-        }
-        this.mappedByteBuffer.force();
+        mappedByteBuffer.put(byteBuffer);
+        mappedByteBuffer.force();
     }
 
     public Slot getSlot(long timeMs) {
@@ -139,6 +151,7 @@ public class TimerWheel {
         localBuffer.get().putLong(firstPos);
         localBuffer.get().putLong(lastPos);
     }
+
     public void putSlot(long timeMs, long firstPos, long lastPos, int num, int magic) {
         localBuffer.get().position(getSlotIndex(timeMs) * Slot.SIZE);
         localBuffer.get().putLong(timeMs / precisionMs);
@@ -205,5 +218,36 @@ public class TimerWheel {
             }
         }
         return allNum;
+    }
+
+    private String selectSnapshotByFlag(long flag) {
+        if (flag < 0) {
+            return this.fileName;
+        }
+        return this.fileName + "." + flag;
+    }
+
+    public void cleanExpiredSnapshot() {
+        File dir = new File(this.fileName).getParentFile();
+        File[] files = dir.listFiles();
+        File tmpFile = null;
+        long tmpFlag = -1;
+        if (files != null) {
+            for (File f : files) {
+                String tmpFileName = f.getName();
+                if (tmpFileName.startsWith(TIMER_WHEEL_FILE_NAME + ".")) {
+                    long flag = UtilAll.asLong(tmpFileName.substring(TIMER_WHEEL_FILE_NAME.length() + 1), -1);
+                    if (flag > tmpFlag) {
+                        if (tmpFile != null) {
+                            UtilAll.deleteFile(tmpFile);
+                        }
+                        tmpFile = f;
+                        tmpFlag = flag;
+                    } else if (tmpFile != null) {
+                        UtilAll.deleteFile(f);
+                    }
+                }
+            }
+        }
     }
 }

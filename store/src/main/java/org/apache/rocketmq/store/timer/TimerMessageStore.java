@@ -244,7 +244,7 @@ public class TimerMessageStore {
     }
 
     public static String getTimerWheelPath(final String rootDir) {
-        return rootDir + File.separator + "timerwheel";
+        return rootDir + File.separator + TimerWheel.TIMER_WHEEL_FILE_NAME;
     }
 
     public static String getTimerLogPath(final String rootDir) {

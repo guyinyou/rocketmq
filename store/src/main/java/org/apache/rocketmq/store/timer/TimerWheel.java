@@ -120,7 +120,7 @@ public class TimerWheel {
         FileChannel fileChannel = randomAccessFile.getChannel();
         MappedByteBuffer mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, wheelLength);
         mappedByteBuffer.position(0);
-        mappedByteBuffer.put(byteBuffer);
+        mappedByteBuffer.put(bf);
         mappedByteBuffer.force();
     }
 

@@ -47,4 +47,15 @@ public class Slot {
         this.num = num;
         this.magic = magic;
     }
+
+    @Override
+    public String toString() {
+        return "Slot{" +
+            "timeMs=" + timeMs +
+            ", firstPos=" + firstPos +
+            ", lastPos=" + lastPos +
+            ", num=" + num +
+            ", magic=" + magic +
+            '}';
+    }
 }

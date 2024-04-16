@@ -159,6 +159,19 @@ public class TimerMessageStore {
     private final BrokerStatsManager brokerStatsManager;
     private Function<MessageExtBrokerInner, PutMessageResult> escapeBridgeHook;
 
+    public static void main(String[] args) throws IOException {
+        long currentTimeMs = System.currentTimeMillis();
+        System.out.println(currentTimeMs);
+        int slotsTotal = TIMER_WHEEL_TTL_DAY * DAY_SECS;
+        int precisionMs = 1000;
+        TimerWheel timerWheel = new TimerWheel(
+            getTimerWheelPath("/Users/guyinyou/store"), 1713253460120L, slotsTotal, precisionMs);
+        timerWheel.putSlot(currentTimeMs, 0, 1, 2, MAGIC_DEFAULT);
+        System.out.println(timerWheel.getRawSlot(1713145158366L).toString());
+        timerWheel.flush(currentTimeMs);
+        timerWheel.cleanExpiredSnapshot();
+    }
+
     public TimerMessageStore(final MessageStore messageStore, final MessageStoreConfig storeConfig,
         TimerCheckpoint timerCheckpoint, TimerMetrics timerMetrics,
         final BrokerStatsManager brokerStatsManager) throws IOException {
@@ -172,7 +185,7 @@ public class TimerMessageStore {
         // TimerWheel contains the fixed number of slots regardless of precision.
         this.slotsTotal = TIMER_WHEEL_TTL_DAY * DAY_SECS;
         this.timerWheel = new TimerWheel(
-            getTimerWheelPath(storeConfig.getStorePathRootDir()), this.slotsTotal, precisionMs);
+            getTimerWheelPath(storeConfig.getStorePathRootDir()), timerCheckpoint.getDataVersion().getTimestamp(), this.slotsTotal, precisionMs);
         this.timerLog = new TimerLog(getTimerLogPath(storeConfig.getStorePathRootDir()), timerLogFileSize);
         this.timerMetrics = timerMetrics;
         this.timerCheckpoint = timerCheckpoint;
@@ -520,7 +533,6 @@ public class TimerMessageStore {
         prepareTimerCheckPoint();
         timerFlushService.shutdown();
         timerLog.shutdown();
-        timerCheckpoint.shutdown();
 
         enqueuePutQueue.clear(); //avoid blocking
         dequeueGetQueue.clear(); //avoid blocking
@@ -537,6 +549,8 @@ public class TimerMessageStore {
             dequeuePutMessageServices[i].shutdown();
         }
         timerWheel.shutdown(false);
+        timerCheckpoint.shutdown();
+        timerWheel.cleanExpiredSnapshot();
 
         this.scheduler.shutdown();
         UtilAll.cleanBuffer(this.bufferLocal.get());
@@ -568,7 +582,7 @@ public class TimerMessageStore {
                     currQueueOffset = Math.min(currQueueOffset, timerCheckpoint.getMasterTimerQueueOffset());
                     commitQueueOffset = currQueueOffset;
                     prepareTimerCheckPoint();
-                    timerCheckpoint.flush();
+//                    timerCheckpoint.flush();
                     currReadTimeMs = timerCheckpoint.getLastReadTimeMs();
                     commitReadTimeMs = currReadTimeMs;
                 }
@@ -1668,9 +1682,11 @@ public class TimerMessageStore {
             while (!this.isStopped()) {
                 try {
                     prepareTimerCheckPoint();
+                    long flag = timerCheckpoint.getDataVersion().getTimestamp();
                     timerLog.getMappedFileQueue().flush(0);
-                    timerWheel.flush();
+                    timerWheel.flush(flag);
                     timerCheckpoint.flush();
+                    timerWheel.cleanExpiredSnapshot();
                     if (System.currentTimeMillis() - start > storeConfig.getTimerProgressLogIntervalMs()) {
                         start = System.currentTimeMillis();
                         long tmpQueueOffset = currQueueOffset;
